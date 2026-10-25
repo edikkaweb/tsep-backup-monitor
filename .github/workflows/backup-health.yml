@@ -1,0 +1,44 @@
+name: TSEP backup health
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: 'TEST ONLY: emit an intentional failure to verify owner notifications'
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: backup-health
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check the public backup status without credentials
+        shell: python
+        run: |
+          import datetime, json, urllib.request
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kw):raise ValueError('Unexpected redirect')
+          opener=urllib.request.build_opener(NoRedirect)
+          request=urllib.request.Request('https://app.tsep-protocol.org/health/backup',headers={'Accept':'application/json','Cache-Control':'no-cache','User-Agent':'TSEP-backup-monitor/1.0'})
+          with opener.open(request,timeout=20) as response:
+              raw=response.read(4097)
+              assert response.status==200 and len(raw)<=4096 and response.headers.get_content_type()=='application/json','Unexpected status response'
+              row=json.loads(raw)
+          assert set(row)=={'schema','ok','generated_at','checked_at','snapshot_at'} and row['schema']=='tsep-backup-health-1' and row['ok'] is True,'Backup reports an error'
+          now=datetime.datetime.now(datetime.timezone.utc)
+          for field,hours in [('generated_at',.25),('checked_at',3),('snapshot_at',36)]:
+              value=datetime.datetime.fromisoformat(row[field].replace('Z','+00:00'))
+              assert value.tzinfo is not None and datetime.timedelta(0)<=now-value<=datetime.timedelta(hours=hours),'Backup status is stale'
+          print('PASS: recent offsite backup and recent autonomous verification.')
+      - name: Intentional notification drill (no site changes)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.simulate_failure }}
+        shell: python
+        run: |
+          raise SystemExit('INTENTIONAL TEST: notification drill; this is not a TSEP outage.')
